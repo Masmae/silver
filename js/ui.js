@@ -275,7 +275,6 @@ function controls() {
   }
   if (state.phase === "power") {
     const pw = state.pending.power;
-    if (!ui.mode) ui.mode = `power${pw}`;
     const out = [];
     if (pw === 7) out.push(btn("Look", () => doAction({ type: "power7", cardIds: ui.sel }), "btn primary", !ui.sel.length));
     if (pw === 10 && ui.pick.discardId) out.push(btn("Exchange", () => doAction({ type: "power10", discardId: ui.pick.discardId, cardIds: ui.sel }), "btn primary", !ui.sel.length));
@@ -342,7 +341,18 @@ function settingsPanel() {
       h("button", { class: "btn primary", onclick: close }, "Done"))));
 }
 
+/** Keep the interaction mode in step with the game before anything is drawn. */
+function syncMode() {
+  if (myTurn() && state.phase === "power") {
+    const want = `power${state.pending.power}`;
+    if (ui.mode !== want) ui = { mode: want, sel: [], pick: {}, note: ui.note };
+  } else if (ui.mode?.startsWith("power")) {
+    ui = { mode: null, sel: [], pick: {}, note: "" };
+  }
+}
+
 function render() {
+  syncMode();
   const view = viewFor(state, ME);
   const [line, sub] = promptLines();
   const us = teamOf(ME);
