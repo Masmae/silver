@@ -121,3 +121,49 @@ test("the strategic bots beat the original bots (both seatings)", () => {
   console.log(`strategic bots won ${smartWins}/${games} (${Math.round((100 * smartWins) / games)}%), average margin ${(margin / games).toFixed(1)} points/game`);
   assert.ok(smartWins / games > 0.6, "strategic bots should clearly beat the original ones");
 });
+
+// The behaviours players asked for (13 as a wild set card, Squire powers, Rascal, Master pairs).
+test("bot: keeps a 13 to pair with, then swaps the pair out together for a low card", async () => {
+  const { chooseAction } = await import("../js/bot.js");
+  const s = newGame({ seed: 21 }); s.current = 1; s.amulet.holder = 2;
+  const v = s.players[1].village;
+  [9, 13, 6, 7, 8].forEach((x, i) => { v[i].v = x; if (!s.players[1].known.includes(v[i].id)) s.players[1].known.push(v[i].id); });
+  s.phase = "drawn"; s.pending = { card: { id: "t-low", v: 1, up: false }, from: "deck" };
+  const a = chooseAction(s, 1);
+  assert.equal(a.type, "exchange");
+  assert.deepEqual(new Set(a.cardIds), new Set([v[0].id, v[1].id]), "9 + 13 go out as a set");
+});
+
+test("bot: takes a Squire 12 to rob an opponent's known low card", async () => {
+  const { chooseAction } = await import("../js/bot.js");
+  const s = newGame({ seed: 22 }); s.current = 1; s.amulet.holder = 2;
+  const mine = s.players[1].village, theirs = s.players[0].village;
+  [11, 10, 9, 12, 8].forEach((x, i) => { mine[i].v = x; if (!s.players[1].known.includes(mine[i].id)) s.players[1].known.push(mine[i].id); });
+  theirs[0].v = 0; s.players[1].known.push(theirs[0].id);
+  s.squire = [{ id: "sq12", v: 12, up: true }];
+  s.discard.push({ id: "d-hi", v: 11, up: true });
+  assert.deepEqual(chooseAction(s, 1), { type: "takeSquire", index: 0 });
+  const t = act(s, 1, { type: "takeSquire", index: 0 });
+  assert.deepEqual(chooseAction(t, 1), { type: "discardDrawn", usePower: true }, "and uses its power");
+});
+
+test("bot: the Exposer turns up its own 4 (Rascal) to switch it on", async () => {
+  const { chooseAction } = await import("../js/bot.js");
+  const s = newGame({ seed: 23 }); s.current = 1; s.amulet.holder = 2;
+  const v = s.players[1].village;
+  v[2].v = 4; if (!s.players[1].known.includes(v[2].id)) s.players[1].known.push(v[2].id);
+  s.phase = "power"; s.pending = { power: 5 };
+  assert.deepEqual(chooseAction(s, 1), { type: "power5", cardId: v[2].id });
+});
+
+test("bot: the Master fetches a card that pairs with one it holds", async () => {
+  const { chooseAction } = await import("../js/bot.js");
+  const s = newGame({ seed: 24 }); s.current = 1; s.amulet.holder = 2;
+  const v = s.players[1].village;
+  [7, 12, 11, 10, 9].forEach((x, i) => { v[i].v = x; if (!s.players[1].known.includes(v[i].id)) s.players[1].known.push(v[i].id); });
+  s.discard = [{ id: "d7", v: 7, up: true }, { id: "d8", v: 8, up: true }, { id: "m10", v: 10, up: true }];
+  s.phase = "power"; s.pending = { power: 10 };
+  const a = chooseAction(s, 1);
+  assert.equal(a.type, "power10");
+  assert.equal(a.discardId, "d7", "the 7 pairs with the 7 it holds (the 8 doesn't)");
+});

@@ -413,11 +413,20 @@ function roundPanel() {
     h("div", { class: "controls" }, h("button", { class: "btn primary", onclick: next }, over ? "New game" : "Next round"))));
 }
 
+/** Panel title with a Back button that stays visible while the panel scrolls. */
+function panelHead(title, close) {
+  return h("div", { class: "panel-head" },
+    h("button", { class: "back-btn", onclick: close, "aria-label": "Back to the game" }, "‹ Back"),
+    h("h2", {}, title));
+}
+// Escape closes Rules / Settings.
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && panel) { panel = null; render(); } });
+
 function rulesPanel() {
   if (panel !== "rules") return null;
   const close = () => { panel = null; render(); };
-  return h("div", { class: "overlay", onclick: (e) => { if (e.target.classList.contains("overlay")) close(); } }, h("div", { class: "panel" },
-    h("h2", {}, "How to play"),
+  return h("div", { class: "overlay", onclick: (e) => { if (e.target.classList.contains("overlay")) close(); } }, h("div", { class: "panel with-head" },
+    panelHead("How to play", close),
     h("p", {}, "Teams: You & Partner (opposite) vs West & East. Your team wants the lowest combined card total after 4 rounds."),
     h("p", {}, "At the start of each round you see 2 of your 5 face-down cards for a few seconds — remember them! Any card you peek at later is also shown only briefly."),
     h("p", {}, "On your turn: draw from the deck (keep it by exchanging, or discard it — discarding a 5–12 lets you use its power), take the top discard (you must keep it, face-up), or take a Squire card."),
@@ -431,8 +440,8 @@ function rulesPanel() {
 function settingsPanel() {
   if (panel !== "settings") return null;
   const close = () => { panel = null; render(); };
-  return h("div", { class: "overlay", onclick: (e) => { if (e.target.classList.contains("overlay")) close(); } }, h("div", { class: "panel" },
-    h("h2", {}, "Settings"),
+  return h("div", { class: "overlay", onclick: (e) => { if (e.target.classList.contains("overlay")) close(); } }, h("div", { class: "panel with-head" },
+    panelHead("Settings", close),
     h("p", {}, "Computer players' speed"),
     h("div", { class: "seg" }, Object.keys(SPEEDS).map((k) => h("button", { class: "btn" + (settings.speed === k ? " primary" : ""), onclick: () => { settings.speed = k; persist(); render(); } }, k[0].toUpperCase() + k.slice(1)))),
     h("div", { class: "controls" },

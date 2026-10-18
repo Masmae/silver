@@ -104,6 +104,10 @@ button { font: inherit; color: inherit; touch-action: manipulation; }
 .overlay { position: fixed; inset: 0; background: rgba(5, 8, 16, .72); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 10; }
 .panel { background: var(--bg2); border: 1px solid var(--line); border-radius: 18px; padding: 18px; width: min(520px, 100%); max-height: 90vh; overflow: auto; }
 .panel h2 { margin: 0 0 8px; font-size: 20px; }
+.panel.with-head { padding-top: 0; }
+.panel-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 10px; margin: 0 -18px 8px; padding: 14px 18px 10px; background: var(--bg2); border-bottom: 1px solid var(--line); }
+.panel-head h2 { margin: 0; }
+.back-btn { background: none; border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; color: var(--ink); cursor: pointer; font-size: 14px; }
 .panel table { width: 100%; border-collapse: collapse; margin: 8px 0 14px; font-size: 14px; }
 .panel td, .panel th { padding: 6px 4px; border-bottom: 1px solid var(--line); text-align: left; }
 .panel td.num, .panel th.num { text-align: right; font-variant-numeric: tabular-nums; }

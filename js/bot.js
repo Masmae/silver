@@ -22,6 +22,14 @@ export const DEFAULTS = {
   callOwnMax: 10,       // …and our own known-ish total at most this
   callUnknownMe: 2.5, callUnknownPartner: 1.2, callUnknownOpp: 0.6,
   callOppImprove: 5, callLate: 3, callLateDeck: 10,
+  // What a card in our village really costs, beyond its face value:
+  dopp: 6,              // a 13 early in the round, with a known card to pair it with (13 is wild in sets)
+  lateDeck: 8,          // …"late" = fewer deck cards than this (or someone called): a 13 is just 13 again
+  rascal: 2,            // a face-up 4 (Rascal): an extra card to choose from every draw
+  empath: 0.8,          // a face-up 2 (Empath): a free peek every turn
+  bodyguard: 0.6,       // a face-up 3 (Bodyguard): protection
+  pair: 2,              // a card matching one we know: the pair can later go out together for one card
+  rascalDraw: 1.2,      // each face-up 4 makes drawing worth this much more
 };
 let P = DEFAULTS;
 
@@ -39,29 +47,43 @@ export function knowledge(state, seat) {
   const val = (c) => (canSee(state, seat, c) ? c.v : E);
   const me = state.players[seat];
   const mine = me.village.filter((c) => c.id !== state.amulet.card).map((c) => ({ c, known: canSee(state, seat, c), v: val(c) }));
+  const early = state.deck.length >= P.lateDeck && state.caller === null;
+  /**
+   * What a card of value v really costs in our village. `up`: it is/will be face-up (village
+   * powers work); `without`: ignore this card when looking for a partner (it's the one leaving).
+   */
+  const worth = (v, up, without = null, self = null) => {
+    let w = v;
+    const others = mine.filter((x) => x.known && x.c.id !== without && x.c.id !== self);
+    if (v === 13 && early && others.some((x) => x.v !== 13)) w -= P.dopp;
+    if (up) w -= v === 4 ? P.rascal : v === 2 ? P.empath : v === 3 ? P.bodyguard : 0;
+    if (v >= 5 && v <= 12 && others.some((x) => x.v === v)) w -= P.pair;
+    return w;
+  };
+  for (const x of mine) x.w = x.known ? worth(x.v, x.c.up, null, x.c.id) : E;
   const total = (s) => state.players[s].village.reduce((t, c) => t + val(c), 0);
   const unknown = (s) => state.players[s].village.filter((c) => !canSee(state, seat, c)).length;
   const opponents = [0, 1, 2, 3].filter((s) => teamOf(s) !== teamOf(seat));
   const nextIsOpponent = teamOf((seat + 1) % 4) !== teamOf(seat);
-  return { E, val, me, mine, total, unknown, opponents, nextIsOpponent };
+  return { E, val, me, mine, total, unknown, opponents, nextIsOpponent, worth, early };
 }
 
 /**
  * Best way to bring a card of value `v` into our village: replace one card, or a
  * matching set (13s are wild). Returns { ids, gain } — gain in expected points.
  */
-export function bestExchange(K, v) {
+export function bestExchange(K, v, up = false) {
   let best = { ids: null, gain: -Infinity };
   const giftPenalty = (outVals) => K.nextIsOpponent ? outVals.reduce((t, x) => t + (x <= 3 ? (4 - x) * P.gift : 0), 0) : 0;
   for (const x of K.mine) {
-    const gain = x.v - v - giftPenalty(x.known ? [x.v] : []);
+    const gain = x.w - K.worth(v, up, x.c.id) - giftPenalty(x.known ? [x.v] : []);
     if (gain > best.gain) best = { ids: [x.c.id], gain };
   }
   const known = K.mine.filter((x) => x.known);
   for (let target = 1; target <= 12; target++) {
     const group = known.filter((x) => x.v === target || x.v === 13);
     if (group.filter((x) => x.v === target).length < 1 || group.length < 2) continue;
-    const gain = group.reduce((t, x) => t + x.v, 0) - v - giftPenalty(group.map((x) => x.v)) + P.setBonus; // fewer cards also helps calling
+    const gain = group.reduce((t, x) => t + x.v, 0) - K.worth(v, up, group[0].c.id) - giftPenalty(group.map((x) => x.v)) + P.setBonus; // fewer cards also helps calling
     if (gain > best.gain) best = { ids: group.map((x) => x.c.id), gain };
   }
   return best;
@@ -88,7 +110,13 @@ function powerPlan(state, seat, p, K) {
   const ownUnknown = K.mine.filter((x) => !x.known && !x.c.up);
   const none = { gain: 0, action: { type: "skipPower" } };
   switch (p) {
-    case 5: return ownUnknown.length ? { gain: P.info * 0.8, action: { type: "power5", cardId: ownUnknown[0].c.id } } : none;
+    case 5: {
+      // Turn up our own known 4 / 2 / 3 to switch its power on; otherwise reveal an unknown card.
+      const sleeper = K.mine.filter((x) => x.known && !x.c.up && [4, 2, 3].includes(x.v))
+        .map((x) => ({ x, g: x.v === 4 ? P.rascal : x.v === 2 ? P.empath : P.bodyguard })).sort((a, b) => b.g - a.g)[0];
+      if (sleeper && sleeper.g >= P.info * 0.8) return { gain: sleeper.g, action: { type: "power5", cardId: sleeper.x.c.id } };
+      return ownUnknown.length ? { gain: P.info * 0.8, action: { type: "power5", cardId: ownUnknown[0].c.id } } : none;
+    }
     case 6: {
       const t = targets(state, seat, K, { faceDownOnly: true, unseenOnly: true });
       return t.length ? { gain: P.oppInfo, action: { type: "power6", cardId: t[0].c.id } } : none;
@@ -106,7 +134,7 @@ function powerPlan(state, seat, p, K) {
     case 10: {
       let best = none;
       for (const c of state.discard.slice(0, -1)) {
-        const ex = bestExchange(K, c.v);
+        const ex = bestExchange(K, c.v, true);                       // the Master's card comes in face-up
         if (ex.ids && ex.gain > best.gain) best = { gain: ex.gain, action: { type: "power10", discardId: c.id, cardIds: ex.ids } };
       }
       return best;
@@ -114,8 +142,11 @@ function powerPlan(state, seat, p, K) {
     case 11: {
       const top = state.deck[0];
       if (!top) return none;
-      // The bot sees the top card only after choosing the power, so plan on the expected value.
-      return { gain: 1.5, action: null, needsTop: true };
+      // The top card is seen only after choosing the power: plan on the expected value — swap it
+      // for our worst card, or hand it to an opponent in place of their best known card.
+      const worst = Math.max(...K.mine.map((x) => x.w)) - K.E;
+      const opp = Math.max(0, ...targets(state, seat, K, { mustSee: true }).map((t) => (K.E - t.v) * P.witchOpp));
+      return { gain: Math.max(1.5, worst, opp), action: null, needsTop: true };
     }
     case 12: {
       let best = none;
@@ -177,10 +208,18 @@ export function chooseAction(state, seat, params = DEFAULTS) {
 
     // Compare a sure thing (the discard / a Squire card) with the expected value of drawing.
     const top = state.discard[state.discard.length - 1];
-    const fromDiscard = types.includes("takeDiscard") && top ? bestExchange(K, top.v) : { gain: -Infinity };
+    const fromDiscard = types.includes("takeDiscard") && top ? bestExchange(K, top.v, true) : { gain: -Infinity };   // comes in face-up
+    // A Squire card can be kept (face-up) or discarded for its power, like a drawn card.
     let squire = { gain: -Infinity };
-    if (types.includes("takeSquire")) state.squire.forEach((c, i) => { const ex = bestExchange(K, c.v); if (ex.gain > squire.gain) squire = { ...ex, index: i }; });
-    const drawValue = types.includes("draw") ? P.drawValue : -Infinity;   // typical value of a fresh draw (swap or power)
+    if (types.includes("takeSquire")) state.squire.forEach((c, i) => {
+      const keep = bestExchange(K, c.v, true).gain;
+      const power = c.v >= 5 && c.v <= 12 && state.caller !== seat ? powerPlan(state, seat, c.v, K).gain : -Infinity;
+      const g = Math.max(keep, power);
+      if (g > squire.gain) squire = { gain: g, index: i };
+    });
+    // A fresh draw (swap or power); each face-up 4 adds a card to choose from.
+    const rascals = K.me.village.filter((c) => c.up && c.v === 4).length;
+    const drawValue = types.includes("draw") ? P.drawValue + P.rascalDraw * rascals : -Infinity;
     if (squire.gain >= Math.max(fromDiscard.gain, drawValue) && squire.gain > 0) return { type: "takeSquire", index: squire.index };
     if (fromDiscard.gain >= drawValue && fromDiscard.gain > 0) return { type: "takeDiscard", cardIds: fromDiscard.ids };
     if (types.includes("draw")) return { type: "draw" };
@@ -199,7 +238,7 @@ export function chooseAction(state, seat, params = DEFAULTS) {
 
   if (state.phase === "drawn") {
     const card = state.pending.card;
-    const ex = bestExchange(K, card.v);
+    const ex = bestExchange(K, card.v, state.pending.from === "squire");   // a kept Squire card stays face-up
     const pw = card.v >= 5 && card.v <= 12 && state.caller !== seat ? powerPlan(state, seat, card.v, K) : { gain: 0 };
     if (ex.ids && ex.gain > Math.max(pw.gain, P.keepMin)) return { type: "exchange", cardIds: ex.ids };
     return { type: "discardDrawn", usePower: pw.gain > 0 };
