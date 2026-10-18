@@ -9,6 +9,11 @@ const SETTINGS = "silver.settings.v1";
 const REVEAL_MS = 4000;          // how long a peeked card stays visible before flipping back
 const START_REVEAL_MS = 6000;    // memorise your two cards at the start of a round
 const SPEEDS = { relaxed: [1800, 1200], normal: [1200, 800], fast: [600, 400] };
+const FX_MS = 2600;              // how long a moved / peeked card stays highlighted
+const ALERT_MS = 4000;           // "West robbed one of your cards" notice
+const CALL_MS = 2800;            // the giant VOTE banner
+const AFFECTS_ME_PAUSE = 1500;   // extra pause before the next bot when a move touched your cards
+const HISTORY = 2;               // moves shown under the message (public info only)
 
 const app = document.getElementById("app");
 const saved = load(SAVE, (s) => s?.version === 1);
@@ -20,8 +25,12 @@ let panel = null;                 // "rules" | "settings" | null
 const reveal = new Map();         // cardId -> time it flips back face-down (memory play)
 // A resumed game doesn't flash old knowledge again; a new game shows your two cards.
 let knownBefore = new Set(saved ? state.players[ME].known : []);
-let lastBotLine = "";
 let memorizeUntil = saved ? 0 : Date.now() + START_REVEAL_MS;   // start-of-round memorising window
+const fx = new Map();             // cardId -> { kind: "moved" | "new" | "peek" | "flip" | "touch", until }
+let fxTimer = null;
+let alert = null;                 // { text, until }: a move that touched your cards
+let callBanner = null;            // { seat, until }: someone called a vote
+let flipNext = false;             // animate card movement on the next render
 
 function load(key, ok) { try { const v = JSON.parse(localStorage.getItem(key)); return ok(v) ? v : null; } catch { return null; } }
 function persist() { try { localStorage.setItem(SAVE, JSON.stringify(state)); localStorage.setItem(SETTINGS, JSON.stringify(settings)); } catch { /* ignore */ } }
@@ -67,13 +76,76 @@ function setState(next) {
   persist();
 }
 
+// ---------------------------------------------------------------- moves: effects, alerts, history
+
+/** Cards a peek action looks at (shown again even if you'd seen them before: refreshing memory is the point). */
+function peekTargets(action) {
+  if (action.type === "empath" || action.type === "power8" || action.type === "power9") return [action.cardId];
+  if (action.type === "power7") return action.cardIds ?? [];
+  if (action.type === "power12") return [action.theirId];          // the Robber looks at the card it took
+  return [];
+}
+
+/** Apply a move by `seat`, then work out what to highlight and announce. */
+function apply(seat, action) {
+  const prev = state;
+  const logLen = prev.log.length;
+  setState(act(prev, seat, action));
+  if (state.round !== prev.round || state.version !== prev.version) { fx.clear(); return; }
+  const now = Date.now(), until = now + FX_MS;
+  const where = (st) => { const m = new Map(); st.players.forEach((p, s) => p.village.forEach((c) => m.set(c.id, s))); return m; };
+  const before = where(prev), after = where(state);
+  const touchedMe = new Set();
+  for (const [id, s] of after) {
+    const from = before.get(id);
+    if (from === s) continue;
+    fx.set(id, { kind: from === undefined ? "new" : "moved", until });
+    if (s === ME || from === ME) touchedMe.add(id);
+  }
+  for (const [id, s] of before) if (!after.has(id) && s === ME) touchedMe.add(id);      // left your village
+  const top = state.discard.at(-1);
+  if (top && top.id !== prev.discard.at(-1)?.id && before.has(top.id)) fx.set(top.id, { kind: "moved", until });
+  const named = [action.cardId, ...(action.cardIds ?? []), action.theirId, action.myId].filter(Boolean);
+  for (const id of named) {
+    if (!after.has(id)) continue;
+    const kind = action.type === "power5" || action.type === "power6" ? "flip"
+      : action.type === "power8" || action.type === "power9" || action.type === "empath" || action.type === "power7" ? "peek"
+      : fx.get(id)?.kind ?? "touch";
+    fx.set(id, { kind, until });
+    if (after.get(id) === ME) touchedMe.add(id);
+  }
+  if (seat === ME) for (const id of peekTargets(action)) if (state.players[ME].known.includes(id)) reveal.set(id, now + REVEAL_MS);
+  scheduleRevealExpiry();
+  const fresh = state.log.slice(logLen).filter((l) => !l.startsWith("Round"));
+  if (seat !== ME && touchedMe.size && fresh.length) alert = { text: fresh.join(" "), until: now + ALERT_MS };
+  if (prev.caller === null && state.caller !== null) callBanner = { seat: state.caller, until: now + CALL_MS };
+  flipNext = true;
+  scheduleFxExpiry();
+  return { affectsMe: touchedMe.size > 0 };
+}
+
+function scheduleFxExpiry() {
+  clearTimeout(fxTimer);
+  const now = Date.now();
+  for (const [id, f] of fx) if (f.until <= now) fx.delete(id);
+  if (alert && alert.until <= now) alert = null;
+  if (callBanner && callBanner.until <= now) callBanner = null;
+  const times = [...[...fx.values()].map((f) => f.until), alert?.until, callBanner?.until].filter(Boolean);
+  if (!times.length) return;
+  fxTimer = setTimeout(() => { scheduleFxExpiry(); render(); }, Math.min(...times) - now + 20);
+}
+
+/** The last few public moves (what everyone at a real table would have seen). */
+function history() {
+  return state.log.filter((l) => !l.startsWith("Round")).slice(-HISTORY);
+}
+
 // ---------------------------------------------------------------- actions
 
 function doAction(action) {
   try {
-    setState(act(state, ME, action));
+    apply(ME, action);
     ui = { mode: null, sel: [], pick: {}, note: "" };
-    lastBotLine = "";
     render();
     scheduleBots();
   } catch (e) {
@@ -88,14 +160,13 @@ function scheduleBots() {
   if (state.phase === "gameOver" || state.phase === "roundOver" || state.current === ME) return;
   const [turnDelay, stepDelay] = SPEEDS[settings.speed] ?? SPEEDS.relaxed;
   // Let the human memorise their cards before the bots start.
-  const wait = Math.max(0, memorizeUntil - Date.now());
+  // …and let a VOTE banner or a move that touched your cards sink in.
+  const now = Date.now();
+  const wait = Math.max(0, memorizeUntil - now, (callBanner?.until ?? 0) - now, (alert?.until ?? 0) - ALERT_MS + AFFECTS_ME_PAUSE - now);
   botTimer = setTimeout(() => {
     const seat = state.current;
     const action = chooseAction(state, seat);
-    const logLen = state.log.length;
-    if (action) setState(act(state, seat, action));
-    const fresh = state.log.slice(logLen).filter((l) => !l.startsWith("Round"));
-    if (fresh.length) lastBotLine = fresh.join(" ");
+    if (action) apply(seat, action);
     render();
     scheduleBots();
   }, wait + (state.phase === "turn" ? turnDelay : stepDelay));
@@ -111,9 +182,12 @@ function typeClass(v) { return v === 13 ? "t-dopp" : v <= 4 ? "t-village" : "t-p
  */
 function cardEl(card, { size = "sm", show = card.up, onclick = null, selected = false, target = false, badge = null, peek = false } = {}) {
   const face = show && card.v !== null && card.v !== undefined;
-  const cls = ["card", size, face ? `face ${typeClass(card.v)}` : "back", peek && face ? "peek" : "", onclick ? "click" : "", selected ? "sel" : "", target ? "target" : ""].filter(Boolean).join(" ");
+  const f = card.id ? fx.get(card.id) : null;
+  const effect = f && f.until > Date.now() ? f.kind : null;
+  const cls = ["card", size, face ? `face ${typeClass(card.v)}` : "back", peek && face ? "peek" : "", onclick ? "click" : "", selected ? "sel" : "", target ? "target" : "", effect ? `fx fx-${effect}` : ""].filter(Boolean).join(" ");
   const label = face ? `${card.v} ${POWERS[card.v].name}${card.up ? "" : " (peeking)"}` : "face-down card";
-  return h("button", { class: cls, onclick, "aria-label": label, disabled: onclick ? null : true },
+  if (effect === "peek" && !badge) badge = h("span", { class: "badge eye", "aria-hidden": "true" }, "👁");
+  return h("button", { class: cls, onclick, "aria-label": label, disabled: onclick ? null : true, "data-id": card.id ?? null },
     face ? [
       h("span", { class: "n" }, card.v),
       h("span", { class: "ic", "aria-hidden": "true" }, FACES[card.v].icon),
@@ -216,14 +290,15 @@ function promptLines() {
   const name = (s) => state.players[s].name;
   if (state.phase === "gameOver" || state.phase === "roundOver") return [""];
   if (memorizing()) return ["Memorize your two cards!", "They flip face-down in a few seconds."];
-  if (!myTurn()) return [lastBotLine || `${name(state.current)} is thinking…`, state.caller !== null ? `${name(state.caller)} called — last turns.` : ""];
+  // What just happened is in "Last moves" below, so this line only says whose turn it is.
+  if (!myTurn()) return [`${name(state.current)} is playing…`, state.caller !== null ? `${name(state.caller)} called — last turns.` : ""];
   const m = ui.mode, pw = state.pending?.power;
   if (state.phase === "turn") {
     if (m === "takeDiscard") return [`Take the ${state.discard.at(-1).v}: choose which of your cards it replaces.`, "Several cards of the same value can go out together (13 is wild)."];
     if (m === "amulet") return ["Choose one of your cards to protect with the Amulet."];
     if (m === "guard") return ["Choose one of your cards for the Bodyguard to protect."];
     if (m === "empath") return ["Choose one of your face-down cards to peek at."];
-    return [state.caller !== null ? `${name(state.caller)} called — this is your last turn!` : "Your turn: draw, take the discard, or call.", lastBotLine];
+    return [state.caller !== null ? `${name(state.caller)} called — this is your last turn!` : "Your turn: draw, take the discard, or call."];
   }
   if (state.phase === "rascal") return ["Rascal: choose which drawn card to keep."];
   if (state.phase === "drawn") {
@@ -299,7 +374,7 @@ function roundPanel() {
   const name = (s) => state.players[s].name;
   const over = state.phase === "gameOver";
   const callerLine = r.caller ? `${name(r.caller.seat)} called — ${r.caller.success ? "and their team was lowest (scores 0)!" : "but their team wasn't lowest (+10)."}` : "No one called this round.";
-  const next = () => { setState(over ? newGame({ names: state.players.map((p) => p.name) }) : act(state, ME, { type: "nextRound" })); lastBotLine = ""; render(); scheduleBots(); };
+  const next = () => { setState(over ? newGame({ names: state.players.map((p) => p.name) }) : act(state, ME, { type: "nextRound" })); render(); scheduleBots(); };
   return h("div", { class: "overlay" }, h("div", { class: "panel" },
     h("h2", {}, over ? "Game over" : `Round ${r.round} of ${ROUNDS}`),
     over ? h("div", { class: "win" }, state.winner === teamOf(ME) ? "You & Partner win! 🌕" : "West & East win") : null,
@@ -370,10 +445,47 @@ function render() {
       seatEl(view, ME, "bottom")),
     masterPicker(),
     h("div", { class: "msg" }, line, sub ? h("small", {}, sub) : null, ui.note ? h("small", { class: "note" }, ui.note) : null),
+    alert ? h("div", { class: "alert", role: "status" }, "⚠️ ", alert.text) : null,
+    historyEl(),
     h("div", { class: "controls" }, controls()),
+    callBannerEl(),
     roundPanel(), rulesPanel(), settingsPanel(),
   ];
+  // FLIP: remember where each card was, re-render, then slide moved cards from their old spot.
+  const animate = flipNext && !matchMedia("(prefers-reduced-motion: reduce)").matches;
+  flipNext = false;
+  const was = animate ? new Map([...app.querySelectorAll("[data-id]")].map((el) => [el.dataset.id, el.getBoundingClientRect()])) : null;
   app.replaceChildren(...parts.filter((x) => x != null && x !== false));
+  if (!animate) return;
+  for (const el of app.querySelectorAll("[data-id]")) {
+    const kind = fx.get(el.dataset.id)?.kind;
+    const old = was.get(el.dataset.id);
+    if (!old || (kind !== "moved" && kind !== "new")) continue;
+    const now = el.getBoundingClientRect();
+    const dx = old.left + old.width / 2 - (now.left + now.width / 2), dy = old.top + old.height / 2 - (now.top + now.height / 2);
+    if (Math.hypot(dx, dy) < 4) continue;
+    el.animate([{ transform: `translate(${dx}px, ${dy}px) scale(${old.width / now.width})`, zIndex: 5 }, { transform: "none", zIndex: 5 }],
+      { duration: 750, easing: "cubic-bezier(.2,.75,.25,1)" });
+  }
+}
+
+function historyEl() {
+  const moves = history();
+  if (!moves.length || state.phase === "roundOver" || state.phase === "gameOver") return null;
+  return h("div", { class: "history" }, h("span", { class: "label" }, "Last moves"), h("ol", {}, moves.map((m) => h("li", {}, m))));
+}
+
+/** Giant VOTE warning when anyone calls. Tap to dismiss. */
+function callBannerEl() {
+  if (!callBanner || callBanner.until <= Date.now()) return null;
+  const who = callBanner.seat === ME ? "You" : state.players[callBanner.seat].name;
+  const ours = teamOf(callBanner.seat) === teamOf(ME);
+  return h("div", { class: `vote-banner ${ours ? "us" : "them"}`, role: "alert", onclick: () => { callBanner = null; render(); scheduleBots(); } },
+    h("div", { class: "vote-inner" },
+      h("div", { class: "vote-icon", "aria-hidden": "true" }, "📣"),
+      h("div", { class: "vote-title" }, "VOTE!"),
+      h("div", { class: "vote-who" }, `${who} called a vote`),
+      h("div", { class: "vote-sub" }, callBanner.seat === ME ? "Everyone else gets one last turn." : "Everyone else gets one last turn — make it count.")));
 }
 
 noteNewKnowledge(START_REVEAL_MS);
