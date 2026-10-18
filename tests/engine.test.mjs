@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { newGame, act, viewFor, GameError, teamOf, ROUNDS } from "../js/engine.js";
 import { chooseAction } from "../js/bot.js";
+import { chooseAction as basicAction } from "../js/bot-basic.js";
 
 function seeded(seed) {
   let a = seed >>> 0;
@@ -98,4 +99,25 @@ test("team scoring: caller's team scores 0 when lowest, else total + 10", () => 
   const r = s.lastRound, ct = teamOf(seat);
   assert.equal(r.roundScore[ct], r.caller.success ? 0 : r.teamSum[ct] + 10);
   assert.equal(r.roundScore[1 - ct], r.teamSum[1 - ct]);
+});
+
+test("the strategic bots beat the original bots (both seatings)", () => {
+  let smartWins = 0, games = 0, margin = 0;
+  for (let g = 1; g <= 200; g++) {
+    for (const smartTeam of [0, 1]) {
+      const rand = seeded(g * 7 + smartTeam);
+      let s = newGame({ seed: g * 13 + smartTeam });
+      for (let steps = 0; s.phase !== "gameOver" && steps < 20000; steps++) {
+        const seat = s.phase === "roundOver" ? 0 : s.current;
+        const a = teamOf(seat) === smartTeam ? chooseAction(s, seat) : basicAction(s, seat, rand);
+        s = act(s, seat, a);
+      }
+      assert.equal(s.phase, "gameOver");
+      games++;
+      if (s.winner === smartTeam) smartWins++;
+      margin += s.teams[1 - smartTeam].score - s.teams[smartTeam].score;
+    }
+  }
+  console.log(`strategic bots won ${smartWins}/${games} (${Math.round((100 * smartWins) / games)}%), average margin ${(margin / games).toFixed(1)} points/game`);
+  assert.ok(smartWins / games > 0.6, "strategic bots should clearly beat the original ones");
 });

@@ -34,6 +34,24 @@ export const POWERS = {
   13: { name: "Doppelgänger", when: "exchange", text: "Matches any value when you exchange several cards at once. Worth 13 if it stays in your village." },
 };
 
+/** Card faces: an icon and a one-line power text, written on the card like the real deck. */
+export const FACES = {
+  0: { icon: "🏡", short: "Both face-up in villages: round ends" },
+  1: { icon: "⚔️", short: "Face-up: extra card by the deck" },
+  2: { icon: "💞", short: "Face-up: peek at one of yours" },
+  3: { icon: "🛡️", short: "Face-up: protect one of your cards" },
+  4: { icon: "😈", short: "Face-up: draw one extra card" },
+  5: { icon: "🔦", short: "Turn one of yours face-up" },
+  6: { icon: "🕯️", short: "Turn any card face-up" },
+  7: { icon: "👀", short: "Look at two of yours" },
+  8: { icon: "🔮", short: "Look at an opponent's card" },
+  9: { icon: "👁️", short: "Look at any card" },
+  10: { icon: "👑", short: "Swap with any discard" },
+  11: { icon: "🧙", short: "Top deck card into any village" },
+  12: { icon: "🦹", short: "Steal a card, give one of yours" },
+  13: { icon: "🎭", short: "Wild in sets · worth 13" },
+};
+
 export const ROUNDS = 4;
 export const teamOf = (seat) => seat % 2;
 export const partnerOf = (seat) => (seat + 2) % 4;
@@ -272,7 +290,8 @@ export function act(prev, seat, action) {
       const { card, from } = state.pending;
       card.up = true;
       state.discard.push(card);
-      const canUse = action.usePower && from === "deck" && card.v >= 5 && card.v <= 12 && state.caller !== seat;
+      // Powers work for cards drawn from the deck or taken from the Squires' row.
+      const canUse = action.usePower && card.v >= 5 && card.v <= 12 && state.caller !== seat;
       if (canUse) {
         state.phase = "power";
         state.pending = { power: card.v };
