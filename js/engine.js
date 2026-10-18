@@ -21,7 +21,7 @@ export const POWERS = {
   0: { name: "Villager", when: "village", text: "If both Villagers are face-up in villages, the round ends immediately." },
   1: { name: "Squire", when: "village", text: "Each face-up Squire in any village keeps one face-up card beside the deck that anyone may take instead of drawing." },
   2: { name: "Empath", when: "village", text: "Each face-up Empath in your village lets you secretly look at one of your face-down cards per turn." },
-  3: { name: "Bodyguard", when: "village", text: "Face-up in your village: protect one of your cards — nobody else can look at or move it." },
+  3: { name: "Bodyguard", when: "village", text: "Face-up in your village: protect one of your cards (it can be the Bodyguard itself) — nobody else can look at or move it. Choose or change it at the start of any of your turns; the protection ends if the Bodyguard leaves your village." },
   4: { name: "Rascal", when: "village", text: "Each face-up Rascal in your village lets you draw one extra card; keep one, the rest go back on the deck." },
   5: { name: "Exposer", when: "discard", text: "Turn one of your face-down cards face-up." },
   6: { name: "Revealer", when: "discard", text: "Turn any face-down card in any village face-up." },
@@ -218,8 +218,29 @@ export function legalTypes(state, seat) {
   return out;
 }
 
-export function act(prev, seat, action) {
-  const state = clone(prev);
+/**
+ * Apply an action and return the new state. `prev` is left untouched, unless `inPlace` is set
+ * (used by the look-ahead player's imagined games, where copying every move is wasted work).
+ */
+export function act(prev, seat, action, opts = {}) {
+  return keepGuardsValid(applyAction(prev, seat, action, opts));
+}
+
+/**
+ * Protection only lasts while it's backed: a protected card must still be in its owner's
+ * village, and there can't be more protected cards than face-up Bodyguards there. So if your 3
+ * leaves (swapped out, robbed), the protection it gave ends.
+ */
+function keepGuardsValid(state) {
+  for (const [seat, ids] of Object.entries(state.guards ?? {})) {
+    const village = state.players[seat]?.village ?? [];
+    state.guards[seat] = ids.filter((id) => village.some((c) => c.id === id)).slice(0, countUp(village, 3));
+  }
+  return state;
+}
+
+function applyAction(prev, seat, action, { inPlace = false } = {}) {
+  const state = inPlace ? prev : clone(prev);
   const allowed = legalTypes(state, seat);
   if (!allowed.includes(action.type)) fail(seat !== state.current && state.phase !== "roundOver" ? "It's not your turn." : `You can't do that now (${action.type}).`);
   const p = state.players[seat];

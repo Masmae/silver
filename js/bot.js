@@ -8,11 +8,25 @@
 import { canSee, legalTypes, isProtected, teamOf, partnerOf } from "./engine.js";
 
 const ALL_VALUES = (() => { const v = [0, 0, 13, 13]; for (let n = 1; n <= 12; n++) v.push(n, n, n, n); return v; })();
-const INFO = 1.1;          // value of learning one of our own unknown cards
-const OPP_INFO = 0.5;      // value of learning an opponent's card
+// Judgment numbers (tuned by self-play, see tests/tune.mjs).
+export const DEFAULTS = {
+  info: 1.1,            // value of learning one of our own unknown cards
+  oppInfo: 0.5,         // value of learning an opponent's card
+  gift: 0.4,            // fear of handing the next (opponent) player a low card, per point under 4
+  setBonus: 1.5,        // extra value of exchanging a set (fewer cards helps calling)
+  drawValue: 3.5,       // typical value of a fresh draw (tuned up from 2.2)
+  keepMin: 0.3,         // keep a drawn card only if it beats using its power by this much
+  robber: 1.8,          // Robber: value per point swapped
+  witchOpp: 0.9,        // Witch: value per point of damage to an opponent
+  callMaxCards: 4,      // call only with this many cards or fewer
+  callOwnMax: 10,       // …and our own known-ish total at most this
+  callUnknownMe: 2.5, callUnknownPartner: 1.2, callUnknownOpp: 0.6,
+  callOppImprove: 5, callLate: 3, callLateDeck: 10,
+};
+let P = DEFAULTS;
 
 /** Everything a seat can reason about. */
-function knowledge(state, seat) {
+export function knowledge(state, seat) {
   // Expected value of an unseen card = average of the cards this seat hasn't seen.
   const seen = [];
   const add = (c) => { if (c && canSee(state, seat, c)) seen.push(c.v); };
@@ -36,9 +50,9 @@ function knowledge(state, seat) {
  * Best way to bring a card of value `v` into our village: replace one card, or a
  * matching set (13s are wild). Returns { ids, gain } — gain in expected points.
  */
-function bestExchange(K, v) {
+export function bestExchange(K, v) {
   let best = { ids: null, gain: -Infinity };
-  const giftPenalty = (outVals) => K.nextIsOpponent ? outVals.reduce((t, x) => t + (x <= 3 ? (4 - x) * 0.4 : 0), 0) : 0;
+  const giftPenalty = (outVals) => K.nextIsOpponent ? outVals.reduce((t, x) => t + (x <= 3 ? (4 - x) * P.gift : 0), 0) : 0;
   for (const x of K.mine) {
     const gain = x.v - v - giftPenalty(x.known ? [x.v] : []);
     if (gain > best.gain) best = { ids: [x.c.id], gain };
@@ -47,7 +61,7 @@ function bestExchange(K, v) {
   for (let target = 1; target <= 12; target++) {
     const group = known.filter((x) => x.v === target || x.v === 13);
     if (group.filter((x) => x.v === target).length < 1 || group.length < 2) continue;
-    const gain = group.reduce((t, x) => t + x.v, 0) - v - giftPenalty(group.map((x) => x.v)) + 1.5; // fewer cards also helps calling
+    const gain = group.reduce((t, x) => t + x.v, 0) - v - giftPenalty(group.map((x) => x.v)) + P.setBonus; // fewer cards also helps calling
     if (gain > best.gain) best = { ids: group.map((x) => x.c.id), gain };
   }
   return best;
@@ -74,20 +88,20 @@ function powerPlan(state, seat, p, K) {
   const ownUnknown = K.mine.filter((x) => !x.known && !x.c.up);
   const none = { gain: 0, action: { type: "skipPower" } };
   switch (p) {
-    case 5: return ownUnknown.length ? { gain: INFO * 0.8, action: { type: "power5", cardId: ownUnknown[0].c.id } } : none;
+    case 5: return ownUnknown.length ? { gain: P.info * 0.8, action: { type: "power5", cardId: ownUnknown[0].c.id } } : none;
     case 6: {
       const t = targets(state, seat, K, { faceDownOnly: true, unseenOnly: true });
-      return t.length ? { gain: OPP_INFO, action: { type: "power6", cardId: t[0].c.id } } : none;
+      return t.length ? { gain: P.oppInfo, action: { type: "power6", cardId: t[0].c.id } } : none;
     }
-    case 7: return ownUnknown.length ? { gain: INFO * Math.min(2, ownUnknown.length), action: { type: "power7", cardIds: ownUnknown.slice(0, 2).map((x) => x.c.id) } } : none;
+    case 7: return ownUnknown.length ? { gain: P.info * Math.min(2, ownUnknown.length), action: { type: "power7", cardIds: ownUnknown.slice(0, 2).map((x) => x.c.id) } } : none;
     case 8: {
       const t = targets(state, seat, K, { faceDownOnly: true, unseenOnly: true });
-      return t.length ? { gain: OPP_INFO, action: { type: "power8", cardId: t[0].c.id } } : none;
+      return t.length ? { gain: P.oppInfo, action: { type: "power8", cardId: t[0].c.id } } : none;
     }
     case 9: {
-      if (ownUnknown.length) return { gain: INFO, action: { type: "power9", cardId: ownUnknown[0].c.id } };
+      if (ownUnknown.length) return { gain: P.info, action: { type: "power9", cardId: ownUnknown[0].c.id } };
       const t = targets(state, seat, K, { faceDownOnly: true, unseenOnly: true });
-      return t.length ? { gain: OPP_INFO, action: { type: "power9", cardId: t[0].c.id } } : none;
+      return t.length ? { gain: P.oppInfo, action: { type: "power9", cardId: t[0].c.id } } : none;
     }
     case 10: {
       let best = none;
@@ -108,7 +122,7 @@ function powerPlan(state, seat, p, K) {
       const give = [...K.mine].sort((a, b) => b.v - a.v)[0];
       if (!give) return none;
       for (const t of targets(state, seat, K, { mustSee: true })) {
-        const gain = (give.v - t.v) * 1.8;      // we drop by (give - take), they rise by the same
+        const gain = (give.v - t.v) * P.robber;      // we drop by (give - take), they rise by the same
         if (gain > best.gain) best = { gain, action: { type: "power12", theirId: t.c.id, myId: give.c.id } };
       }
       return best;
@@ -124,23 +138,23 @@ function witchChoice(state, seat, K) {
   let best = { gain: 0.5, action: { type: "skipPower" } };
   if (ex.ids && ex.gain > best.gain) best = { gain: ex.gain, action: { type: "power11", cardIds: ex.ids } };
   for (const t of targets(state, seat, K, {})) {
-    const gain = (top.v - t.v) * 0.9;            // damage to the opponent
+    const gain = (top.v - t.v) * P.witchOpp;            // damage to the opponent
     if (gain > best.gain) best = { gain, action: { type: "power11", cardId: t.c.id } };
   }
   return best.action;
 }
 
 function shouldCall(state, seat, K) {
-  if (K.me.village.length > 4) return false;
+  if (K.me.village.length > P.callMaxCards) return false;
   const ours = K.total(seat) + K.total(partnerOf(seat));
   const theirs = K.opponents.reduce((t, s) => t + K.total(s), 0);
-  const uncertainty = K.unknown(seat) * 2.5 + K.unknown(partnerOf(seat)) * 1.2 + K.opponents.reduce((t, s) => t + K.unknown(s), 0) * 0.6;
-  const opponentsImprove = 5;                    // they each get one more turn
-  const lateRound = state.deck.length < 10 ? 3 : 0;
-  return ours + uncertainty + opponentsImprove - lateRound < theirs && K.total(seat) <= 10;
+  const uncertainty = K.unknown(seat) * P.callUnknownMe + K.unknown(partnerOf(seat)) * P.callUnknownPartner + K.opponents.reduce((t, s) => t + K.unknown(s), 0) * P.callUnknownOpp;
+  const lateRound = state.deck.length < P.callLateDeck ? P.callLate : 0;
+  return ours + uncertainty + P.callOppImprove - lateRound < theirs && K.total(seat) <= P.callOwnMax;
 }
 
-export function chooseAction(state, seat) {
+export function chooseAction(state, seat, params = DEFAULTS) {
+  P = params;
   const types = legalTypes(state, seat);
   if (!types.length) return null;
   if (types.includes("nextRound")) return { type: "nextRound" };
@@ -166,7 +180,7 @@ export function chooseAction(state, seat) {
     const fromDiscard = types.includes("takeDiscard") && top ? bestExchange(K, top.v) : { gain: -Infinity };
     let squire = { gain: -Infinity };
     if (types.includes("takeSquire")) state.squire.forEach((c, i) => { const ex = bestExchange(K, c.v); if (ex.gain > squire.gain) squire = { ...ex, index: i }; });
-    const drawValue = types.includes("draw") ? 2.2 : -Infinity;   // typical value of a fresh draw (swap or power)
+    const drawValue = types.includes("draw") ? P.drawValue : -Infinity;   // typical value of a fresh draw (swap or power)
     if (squire.gain >= Math.max(fromDiscard.gain, drawValue) && squire.gain > 0) return { type: "takeSquire", index: squire.index };
     if (fromDiscard.gain >= drawValue && fromDiscard.gain > 0) return { type: "takeDiscard", cardIds: fromDiscard.ids };
     if (types.includes("draw")) return { type: "draw" };
@@ -187,7 +201,7 @@ export function chooseAction(state, seat) {
     const card = state.pending.card;
     const ex = bestExchange(K, card.v);
     const pw = card.v >= 5 && card.v <= 12 && state.caller !== seat ? powerPlan(state, seat, card.v, K) : { gain: 0 };
-    if (ex.ids && ex.gain > Math.max(pw.gain, 0.3)) return { type: "exchange", cardIds: ex.ids };
+    if (ex.ids && ex.gain > Math.max(pw.gain, P.keepMin)) return { type: "exchange", cardIds: ex.ids };
     return { type: "discardDrawn", usePower: pw.gain > 0 };
   }
 
