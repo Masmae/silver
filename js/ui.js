@@ -31,6 +31,8 @@ let fxTimer = null;
 let alert = null;                 // { text, until }: a move that touched your cards
 let callBanner = null;            // { seat, until }: someone called a vote
 let flipNext = false;             // animate card movement on the next render
+let dealNext = false;             // deal animation on the next render (new round)
+let ghosts = [];                  // cards that leave the visible table: { id, to: "discard" | "deck" }
 
 function load(key, ok) { try { const v = JSON.parse(localStorage.getItem(key)); return ok(v) ? v : null; } catch { return null; } }
 function persist() { try { localStorage.setItem(SAVE, JSON.stringify(state)); localStorage.setItem(SETTINGS, JSON.stringify(settings)); } catch { /* ignore */ } }
@@ -71,7 +73,7 @@ const memorizing = () => Date.now() < memorizeUntil;
 function setState(next) {
   const newRound = next.round !== state.round || next.version !== state.version;
   state = next;
-  if (newRound) { knownBefore = new Set(); reveal.clear(); memorizeUntil = Date.now() + START_REVEAL_MS; noteNewKnowledge(START_REVEAL_MS); }
+  if (newRound) { knownBefore = new Set(); reveal.clear(); fx.clear(); dealNext = flipNext = true; memorizeUntil = Date.now() + START_REVEAL_MS; noteNewKnowledge(START_REVEAL_MS); }
   else noteNewKnowledge();
   persist();
 }
@@ -86,33 +88,51 @@ function peekTargets(action) {
   return [];
 }
 
-/** Apply a move by `seat`, then work out what to highlight and announce. */
+/**
+ * Where every visible card is: "v<seat>" (a village), "discard" (only the top is drawn), "squire",
+ * or "hand<seat>" (a card drawn and not yet placed). Anything else is in the deck.
+ */
+function locations(st) {
+  const m = new Map();
+  st.players.forEach((p, s) => p.village.forEach((c) => m.set(c.id, `v${s}`)));
+  st.discard.forEach((c) => m.set(c.id, "discard"));
+  st.squire.forEach((c) => m.set(c.id, "squire"));
+  if (st.pending?.card) m.set(st.pending.card.id, `hand${st.current}`);
+  for (const c of st.pending?.cards ?? []) m.set(c.id, `hand${st.current}`);
+  return m;
+}
+
+/** Apply a move by `seat`, then work out what to animate, highlight and announce. */
 function apply(seat, action) {
   const prev = state;
   const logLen = prev.log.length;
   setState(act(prev, seat, action));
-  if (state.round !== prev.round || state.version !== prev.version) { fx.clear(); return; }
+  if (state.round !== prev.round || state.version !== prev.version) { fx.clear(); return { affectsMe: false }; }
   const now = Date.now(), until = now + FX_MS;
-  const where = (st) => { const m = new Map(); st.players.forEach((p, s) => p.village.forEach((c) => m.set(c.id, s))); return m; };
-  const before = where(prev), after = where(state);
+  const before = locations(prev), after = locations(state);
+  const top = state.discard.at(-1)?.id;
   const touchedMe = new Set();
-  for (const [id, s] of after) {
+  for (const [id, loc] of after) {
     const from = before.get(id);
-    if (from === s) continue;
-    fx.set(id, { kind: from === undefined ? "new" : "moved", until });
-    if (s === ME || from === ME) touchedMe.add(id);
+    if (from === loc) continue;
+    if (loc === "discard" && id !== top) { ghosts.push({ id, to: "discard" }); continue; }   // under the top: fly there and vanish
+    fx.set(id, { kind: from ? "moved" : "new", from: from ?? "deck", until });
+    if (loc === `v${ME}` || from === `v${ME}`) touchedMe.add(id);
   }
-  for (const [id, s] of before) if (!after.has(id) && s === ME) touchedMe.add(id);      // left your village
-  const top = state.discard.at(-1);
-  if (top && top.id !== prev.discard.at(-1)?.id && before.has(top.id)) fx.set(top.id, { kind: "moved", until });
+  for (const [id, from] of before) if (!after.has(id)) {                                  // back into the deck (Rascal)
+    ghosts.push({ id, to: "deck" });
+    if (from === `v${ME}`) touchedMe.add(id);
+  }
   const named = [action.cardId, ...(action.cardIds ?? []), action.theirId, action.myId].filter(Boolean);
+  const kindFor = {
+    power5: "flip", power6: "flip", power7: "peek", power8: "peek", power9: "peek", empath: "peek",
+    placeAmulet: "amulet", guard: "guard",
+  }[action.type];
   for (const id of named) {
-    if (!after.has(id)) continue;
-    const kind = action.type === "power5" || action.type === "power6" ? "flip"
-      : action.type === "power8" || action.type === "power9" || action.type === "empath" || action.type === "power7" ? "peek"
-      : fx.get(id)?.kind ?? "touch";
-    fx.set(id, { kind, until });
-    if (after.get(id) === ME) touchedMe.add(id);
+    if (!after.has(id) || after.get(id) === "discard") continue;
+    const old = fx.get(id);
+    fx.set(id, { kind: kindFor ?? old?.kind ?? "touch", from: old?.from, until, look: action.type === "power12" && id === action.theirId });
+    if (after.get(id) === `v${ME}`) touchedMe.add(id);
   }
   if (seat === ME) for (const id of peekTargets(action)) if (state.players[ME].known.includes(id)) reveal.set(id, now + REVEAL_MS);
   scheduleRevealExpiry();
@@ -184,7 +204,7 @@ function cardEl(card, { size = "sm", show = card.up, onclick = null, selected = 
   const face = show && card.v !== null && card.v !== undefined;
   const f = card.id ? fx.get(card.id) : null;
   const effect = f && f.until > Date.now() ? f.kind : null;
-  const cls = ["card", size, face ? `face ${typeClass(card.v)}` : "back", peek && face ? "peek" : "", onclick ? "click" : "", selected ? "sel" : "", target ? "target" : "", effect ? `fx fx-${effect}` : ""].filter(Boolean).join(" ");
+  const cls = ["card", size, face ? `face ${typeClass(card.v)}` : "back", peek && face ? "peek" : "", onclick ? "click" : "", selected ? "sel" : "", target ? "target" : "", effect ? `fx fx-${effect}${f.look ? " fx-look" : ""}` : ""].filter(Boolean).join(" ");
   const label = face ? `${card.v} ${POWERS[card.v].name}${card.up ? "" : " (peeking)"}` : "face-down card";
   if (effect === "peek" && !badge) badge = h("span", { class: "badge eye", "aria-hidden": "true" }, "👁");
   return h("button", { class: cls, onclick, "aria-label": label, disabled: onclick ? null : true, "data-id": card.id ?? null },
@@ -253,8 +273,12 @@ function seatEl(view, seat, where) {
   if (state.amulet.holder === seat) tags.push(h("span", { class: "tag gold" }, state.amulet.card ? "Amulet ●" : "Amulet"));
   if (state.caller === seat) tags.push(h("span", { class: "tag gold" }, "Called"));
   const size = where === "bottom" ? "lg" : "sm";
-  return h("div", { class: `seat ${where}${isTurn ? " turn" : ""}` },
-    h("div", { class: "seat-head" }, h("span", { class: `dot ${us ? "us" : "them"}` }), h("span", { class: "name" }, p.name), h("span", { class: "count" }, `${p.village.length}`), ...tags),
+  // A computer player's drawn card(s), face-down, so draws and discards can be seen moving.
+  const holding = seat !== ME && isTurn ? (state.phase === "drawn" ? [state.pending.card] : state.phase === "rascal" ? state.pending.cards : []) : [];
+  return h("div", { class: `seat ${where}${isTurn ? " turn" : ""}`, "data-anchor": `v${seat}` },
+    h("div", { class: "seat-head" }, h("span", { class: `dot ${us ? "us" : "them"}` }), h("span", { class: "name" }, p.name), h("span", { class: "count" }, `${p.village.length}`), ...tags,
+      holding.length ? h("span", { class: "hand", "data-anchor": `hand${seat}`, "aria-label": `${p.name} is holding ${holding.length} card${holding.length > 1 ? "s" : ""}` },
+        holding.map((c) => cardEl({ id: c.id, v: null, up: false }, { size: "xs" }))) : null),
     h("div", { class: "row" }, p.village.map((c) => {
       const real = state.players[seat].village.find((x) => x.id === c.id);
       const can = clickable(seat, real);
@@ -271,12 +295,12 @@ function centerEl() {
   const top = state.discard.at(-1);
   const pending = state.pending;
   const kids = [
-    h("div", { class: "pile" }, cardEl({ v: null, up: false }, { size: "md" }), h("span", {}, `Deck ${state.deck.length}`)),
-    h("div", { class: "pile" }, top ? cardEl(top, { size: "md" }) : h("div", { class: "card md back" }), h("span", {}, "Discard")),
+    h("div", { class: "pile", "data-anchor": "deck" }, cardEl({ v: null, up: false }, { size: "md" }), h("span", {}, `Deck ${state.deck.length}`)),
+    h("div", { class: "pile", "data-anchor": "discard" }, top ? cardEl(top, { size: "md" }) : h("div", { class: "card md back" }), h("span", {}, "Discard")),
   ];
   if (state.squire.length) {
     const canTake = myTurn() && state.phase === "turn" && !ui.mode && !memorizing();
-    kids.push(h("div", { class: "pile squire" + (canTake ? " live" : "") },
+    kids.push(h("div", { class: "pile squire" + (canTake ? " live" : ""), "data-anchor": "squire" },
       h("div", { class: "row" }, state.squire.map((c, i) => cardEl(c, { size: "md", onclick: canTake ? () => doAction({ type: "takeSquire", index: i }) : null, target: canTake }))),
       h("span", {}, canTake ? "⚔️ Squire: tap to take" : "⚔️ Squire")));
   }
@@ -451,21 +475,47 @@ function render() {
     callBannerEl(),
     roundPanel(), rulesPanel(), settingsPanel(),
   ];
-  // FLIP: remember where each card was, re-render, then slide moved cards from their old spot.
+  // FLIP: remember where each card was, re-render, then slide every card that moved from its old
+  // spot (or from the deck / discard / a hand if it wasn't visible before). Cards that leave the
+  // visible table fly away as copies. A new round deals from the deck.
   const animate = flipNext && !matchMedia("(prefers-reduced-motion: reduce)").matches;
   flipNext = false;
-  const was = animate ? new Map([...app.querySelectorAll("[data-id]")].map((el) => [el.dataset.id, el.getBoundingClientRect()])) : null;
+  const rect = (el) => el?.getBoundingClientRect();
+  const oldCards = animate ? new Map([...app.querySelectorAll("[data-id]")].map((el) => [el.dataset.id, el])) : null;
+  const was = animate ? new Map([...oldCards].map(([id, el]) => [id, rect(el)])) : null;
+  const leaving = animate ? ghosts.map((g) => ({ ...g, el: oldCards.get(g.id), at: was.get(g.id) })).filter((g) => g.el) : [];
+  ghosts = [];
   app.replaceChildren(...parts.filter((x) => x != null && x !== false));
-  if (!animate) return;
+  if (!animate) { dealNext = false; return; }
+  const anchor = (name) => rect(app.querySelector(`[data-anchor="${name}"] .card, [data-anchor="${name}"]`));
+  const fly = (el, from, to, opts = {}) => {
+    const dx = from.left + from.width / 2 - (to.left + to.width / 2), dy = from.top + from.height / 2 - (to.top + to.height / 2);
+    if (Math.hypot(dx, dy) < 4) return;
+    el.animate([{ transform: `translate(${dx}px, ${dy}px) scale(${from.width / to.width})`, zIndex: 5 }, { transform: "none", zIndex: 5 }],
+      { duration: 750, easing: "cubic-bezier(.2,.75,.25,1)", fill: "backwards", ...opts });
+  };
+  if (dealNext) {
+    dealNext = false;
+    const deck = anchor("deck");
+    [...app.querySelectorAll(".seat [data-id]")].forEach((el, i) => deck && fly(el, deck, rect(el), { duration: 420, delay: i * 45 }));
+    return;
+  }
   for (const el of app.querySelectorAll("[data-id]")) {
-    const kind = fx.get(el.dataset.id)?.kind;
-    const old = was.get(el.dataset.id);
-    if (!old || (kind !== "moved" && kind !== "new")) continue;
-    const now = el.getBoundingClientRect();
-    const dx = old.left + old.width / 2 - (now.left + now.width / 2), dy = old.top + old.height / 2 - (now.top + now.height / 2);
-    if (Math.hypot(dx, dy) < 4) continue;
-    el.animate([{ transform: `translate(${dx}px, ${dy}px) scale(${old.width / now.width})`, zIndex: 5 }, { transform: "none", zIndex: 5 }],
-      { duration: 750, easing: "cubic-bezier(.2,.75,.25,1)" });
+    const f = fx.get(el.dataset.id);
+    if (!f || (f.kind !== "moved" && f.kind !== "new" && !f.from)) continue;
+    const from = was.get(el.dataset.id) ?? anchor(f.from ?? "deck");
+    if (from) fly(el, from, rect(el));
+  }
+  for (const g of leaving) {
+    const to = anchor(g.to);
+    if (!to) continue;
+    const copy = g.el.cloneNode(true);
+    copy.classList.add("ghost");
+    Object.assign(copy.style, { position: "fixed", left: `${g.at.left}px`, top: `${g.at.top}px`, width: `${g.at.width}px`, height: `${g.at.height}px`, margin: "0", zIndex: "6", pointerEvents: "none" });
+    document.body.append(copy);
+    const dx = to.left + to.width / 2 - (g.at.left + g.at.width / 2), dy = to.top + to.height / 2 - (g.at.top + g.at.height / 2);
+    copy.animate([{ transform: "none", opacity: 1 }, { transform: `translate(${dx}px, ${dy}px) scale(${to.width / g.at.width})`, opacity: 1, offset: .85 }, { transform: `translate(${dx}px, ${dy}px) scale(${to.width / g.at.width})`, opacity: 0 }],
+      { duration: 800, easing: "cubic-bezier(.2,.75,.25,1)" }).finished.then(() => copy.remove(), () => copy.remove());
   }
 }
 
@@ -489,6 +539,7 @@ function callBannerEl() {
 }
 
 noteNewKnowledge(START_REVEAL_MS);
+if (!saved) dealNext = flipNext = true;      // a fresh game is dealt out from the deck
 render();
 scheduleBots();
 if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) navigator.serviceWorker.register("sw.js").catch(() => {});

@@ -1,5 +1,5 @@
 // Offline: network-first for this site's files, cached copy when offline.
-const CACHE = "silver-v4";
+const CACHE = "silver-v5";
 const FILES = ["./", "index.html", "css/style.css", "js/ui.js", "js/engine.js", "js/bot.js", "manifest.webmanifest", "icons/icon.svg", "icons/icon-180.png"];
 self.addEventListener("install", (e) => e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting())));
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
